@@ -37,7 +37,9 @@ public struct Observations<Element: Sendable, Failure: Error>: AsyncSequence, Se
     var id = 0
     var continuations: [Int: Continuation] = [:]
     var dirty = false
-    
+    // identifies the most recent tracking pass; see emitWillChange
+    var epoch = 0
+
     // create a generation id for the unique identification of the continuations
     // this allows the shared awaiting of the willSets.
     // Most likely, there wont be more than a handful of active iterations
@@ -68,8 +70,13 @@ public struct Observations<Element: Sendable, Failure: Error>: AsyncSequence, Se
     
     // fire off ALL awaiting willChange continuations such that they are no
     // longer pending.
-    static func emitWillChange(_ state: _ManagedCriticalState<State>) {
-      let continuations = state.withCriticalRegion { state in
+    static func emitWillChange(_ state: _ManagedCriticalState<State>, epoch: Int) {
+      let continuations = state.withCriticalRegion { state -> Dictionary<Int, Continuation>.Values? in
+        // a registration that has been superseded by a newer tracking pass (e.g. one
+        // leaked by an iteration that was cancelled before it re-armed) must not
+        // contribute events; otherwise a single mutation is observed more than once
+        // and the surplus is recorded as a duplicate via the dirty flag.
+        guard state.epoch == epoch else { return nil }
         // if there are no continuations present then we have to set the state as dirty
         // else if this is unconditionally set the state might produce duplicate events
         // one for the dirty and one for the continuation.
@@ -81,8 +88,16 @@ public struct Observations<Element: Sendable, Failure: Error>: AsyncSequence, Se
         }
         return state.continuations.values
       }
-      for continuation in continuations {
+      for continuation in continuations ?? [:].values {
         continuation.resume()
+      }
+    }
+
+    // begin a new tracking pass; only the most recently begun pass is live
+    static func advanceEpoch(_ state: _ManagedCriticalState<State>) -> Int {
+      state.withCriticalRegion { state in
+        state.epoch &+= 1
+        return state.epoch
       }
     }
     
@@ -182,6 +197,7 @@ public struct Observations<Element: Sendable, Failure: Error>: AsyncSequence, Se
       // this ferries in an intermediate form with Result to skip over `withObservationTracking` not handling errors being thrown
       // particularly this case is that the error is also an iteration state transition data point (it terminates the sequence)
       // so we need to hold that to get a chance to catch and clean-up
+      let epoch = State.advanceEpoch(state)
       if #available(SwiftStdlib 6.4, *) {
         return try withObservationTracking(options: [.willSet, .deinit]) { () throws(Failure) -> Observations<Element, Failure>.Iteration in
           switch emit {
@@ -194,7 +210,7 @@ public struct Observations<Element: Sendable, Failure: Error>: AsyncSequence, Se
           }
         } onChange: { [state] (event) in
           // resume all cases where the awaiting continuations are awaiting a willSet
-          State.emitWillChange(state)
+          State.emitWillChange(state, epoch: epoch)
         }
       } else {
         // fallback to the previous version
@@ -213,7 +229,7 @@ public struct Observations<Element: Sendable, Failure: Error>: AsyncSequence, Se
           }
         } onChange: { [state] in
           // resume all cases where the awaiting continuations are awaiting a willSet
-          State.emitWillChange(state)
+          State.emitWillChange(state, epoch: epoch)
         }
         switch result {
         case .success(let value): return value

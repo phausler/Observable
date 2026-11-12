@@ -20,7 +20,8 @@
 ///
 /// Noncopyable types can conform: the ``Observation/Observable()`` macro
 /// applies to a `~Copyable` struct, whose properties are observed by property index
-/// rather than by key path.
+/// rather than by key path. It applies to actors and distributed actors the
+/// same way.
 @available(SwiftStdlib 5.9, *)
 public protocol Observable: ~Copyable { }
 
@@ -53,9 +54,19 @@ public protocol Observable: ~Copyable { }
 ///
 /// No key path can name a property of a noncopyable type, so its properties
 /// are observed by property index: tracking and notification work as for a class, but
-/// an event's ``ObservationTracking/Event/matches(_:)`` is always false.
+/// an event's ``ObservationTracking/Event/matches(_:)`` is always false. An
+/// actor's or distributed actor's properties are observed the same way, since
+/// no key path can name an isolated property.
+///
+/// An actor that also declares conformance to ``SnapshotSource`` gets the
+/// synthesis of a snapshot of its observed properties as well:
+///
+///     @Observable
+///     actor Counter: SnapshotSource {
+///        var count = 0
+///     }
 @available(SwiftStdlib 5.9, *)
-@attached(member, names: named(_$observationRegistrar), named(access), named(withMutation), named(shouldNotifyObservers))
+@attached(member, names: named(_$observationRegistrar), named(access), named(withMutation), named(shouldNotifyObservers), named(Snapshot), named(invalidateSnapshot), named(snapshot), named(latestSnapshot))
 @attached(memberAttribute)
 @attached(extension, conformances: Observable)
 public macro Observable() =
@@ -77,7 +88,7 @@ public macro Observable() =
 /// A separate declaration from ``Observable()``, so that `@Observable` keeps
 /// its original availability.
 @available(SwiftStdlib 6.5, *)
-@attached(member, names: named(_$observationRegistrar), named(access), named(withMutation), named(shouldNotifyObservers))
+@attached(member, names: named(_$observationRegistrar), named(access), named(withMutation), named(shouldNotifyObservers), named(Snapshot), named(invalidateSnapshot), named(snapshot), named(latestSnapshot))
 @attached(memberAttribute)
 @attached(extension, conformances: Observable)
 public macro Observable(resolution: ObservationResolution) =
@@ -102,6 +113,11 @@ public enum ObservationResolution {
 /// properties share a property index (`group:`, or `@Observable(resolution: .object)`),
 /// it also passes `representative`, the first of them, whose key path the
 /// accessors pass instead of their own.
+///
+/// On a property of the `Snapshot` of a ``SnapshotSource``, which `@Observable`
+/// synthesizes, it instead synthesizes a getter that registers an access to the
+/// property with the snapshot's registrar, so that reading it under
+/// observation tracking observes it.
 @available(SwiftStdlib 5.9, *)
 @attached(accessor, names: named(init), named(get), named(set), named(_modify))
 @attached(peer, names: prefixed(_))
@@ -113,6 +129,10 @@ public macro ObservationTracked(propertyIndex: Int = -1, group: Int? = nil, repr
 /// By default, an object can observe any property of an observable type that
 /// is accessible to the observing object. To prevent observation of an
 /// accessible property, attach the `ObservationIgnored` macro to the property.
+///
+/// On a property of an actor that conforms to ``SnapshotSource``, it also
+/// leaves the property out of the actor's snapshot, as one whose type is not
+/// `Sendable` must be.
 @available(SwiftStdlib 5.9, *)
 @attached(accessor)
 public macro ObservationIgnored() =

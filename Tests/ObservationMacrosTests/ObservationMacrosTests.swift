@@ -758,20 +758,150 @@ struct ObservationMacrosTests {
   }
 
   @Test
-  func observableOnActorError() {
+  func observableOnActor() {
     assertMacroExpansion(
       #"""
       @Observable
       actor MyActor {
+        var count = 0
       }
       """#,
       expandedSource: #"""
         actor MyActor {
+          var count {
+              @storageRestrictions(initializes: _count)
+              init(initialValue) {
+                _count = initialValue
+              }
+              get {
+                access(propertyIndex: 0)
+                return _count
+              }
+              set {
+                guard shouldNotifyObservers(_count, newValue) else {
+                  _count = newValue
+                  return
+                }
+                withMutation(propertyIndex: 0) {
+                  _count = newValue
+                }
+              }
+              _modify {
+                access(propertyIndex: 0)
+                _$observationRegistrar.willSet(propertyIndex: 0)
+                defer {
+                  _$observationRegistrar.didSet(propertyIndex: 0)
+                }
+                yield &_count
+              }
+          }
+          private  var _count  = 0
+
+            private let _$observationRegistrar = Observation.ObservationRegistrar()
+
+            internal func access(propertyIndex: Int) {
+              _$observationRegistrar.access(propertyIndex: propertyIndex)
+            }
+
+            internal func withMutation<__macro_local_14MutationResultfMu_, __macro_local_7FailurefMu_: Error>(
+              propertyIndex: Int,
+              _ mutation: () throws(__macro_local_7FailurefMu_) -> __macro_local_14MutationResultfMu_
+            ) throws(__macro_local_7FailurefMu_) -> __macro_local_14MutationResultfMu_ {
+              try _$observationRegistrar.withMutation(propertyIndex: propertyIndex, mutation)
+            }
+
+            private nonisolated func shouldNotifyObservers<__macro_local_6MemberfMu_>(_ lhs: __macro_local_6MemberfMu_, _ rhs: __macro_local_6MemberfMu_) -> Bool {
+                true
+            }
+
+            private nonisolated func shouldNotifyObservers<__macro_local_6MemberfMu0_: Equatable>(_ lhs: __macro_local_6MemberfMu0_, _ rhs: __macro_local_6MemberfMu0_) -> Bool {
+                lhs != rhs
+            }
+
+            private nonisolated func shouldNotifyObservers<__macro_local_6MemberfMu1_: AnyObject>(_ lhs: __macro_local_6MemberfMu1_, _ rhs: __macro_local_6MemberfMu1_) -> Bool {
+                lhs !== rhs
+            }
+
+            private nonisolated func shouldNotifyObservers<__macro_local_6MemberfMu2_: Equatable & AnyObject>(_ lhs: __macro_local_6MemberfMu2_, _ rhs: __macro_local_6MemberfMu2_) -> Bool {
+                lhs != rhs
+            }
         }
         """#,
-      diagnostics: [
-        DiagnosticSpec(message: "'@Observable' cannot be applied to actor type 'MyActor'", line: 1, column: 1)
-      ],
+      macroSpecs: macros,
+      failureHandler: expectNoMacroFailure
+    )
+  }
+
+  @Test
+  func observableOnDistributedActor() {
+    assertMacroExpansion(
+      #"""
+      @Observable
+      distributed actor MyActor {
+        var count = 0
+      }
+      """#,
+      expandedSource: #"""
+        distributed actor MyActor {
+          var count {
+              @storageRestrictions(initializes: _count)
+              init(initialValue) {
+                _count = initialValue
+              }
+              get {
+                access(propertyIndex: 0)
+                return _count
+              }
+              set {
+                guard shouldNotifyObservers(_count, newValue) else {
+                  _count = newValue
+                  return
+                }
+                withMutation(propertyIndex: 0) {
+                  _count = newValue
+                }
+              }
+              _modify {
+                access(propertyIndex: 0)
+                _$observationRegistrar.willSet(propertyIndex: 0)
+                defer {
+                  _$observationRegistrar.didSet(propertyIndex: 0)
+                }
+                yield &_count
+              }
+          }
+          private  var _count  = 0
+
+            private let _$observationRegistrar = Observation.ObservationRegistrar()
+
+            internal func access(propertyIndex: Int) {
+              _$observationRegistrar.access(propertyIndex: propertyIndex)
+            }
+
+            internal func withMutation<__macro_local_14MutationResultfMu_, __macro_local_7FailurefMu_: Error>(
+              propertyIndex: Int,
+              _ mutation: () throws(__macro_local_7FailurefMu_) -> __macro_local_14MutationResultfMu_
+            ) throws(__macro_local_7FailurefMu_) -> __macro_local_14MutationResultfMu_ {
+              try _$observationRegistrar.withMutation(propertyIndex: propertyIndex, mutation)
+            }
+
+            private nonisolated func shouldNotifyObservers<__macro_local_6MemberfMu_>(_ lhs: __macro_local_6MemberfMu_, _ rhs: __macro_local_6MemberfMu_) -> Bool {
+                true
+            }
+
+            private nonisolated func shouldNotifyObservers<__macro_local_6MemberfMu0_: Equatable>(_ lhs: __macro_local_6MemberfMu0_, _ rhs: __macro_local_6MemberfMu0_) -> Bool {
+                lhs != rhs
+            }
+
+            private nonisolated func shouldNotifyObservers<__macro_local_6MemberfMu1_: AnyObject>(_ lhs: __macro_local_6MemberfMu1_, _ rhs: __macro_local_6MemberfMu1_) -> Bool {
+                lhs !== rhs
+            }
+
+            private nonisolated func shouldNotifyObservers<__macro_local_6MemberfMu2_: Equatable & AnyObject>(_ lhs: __macro_local_6MemberfMu2_, _ rhs: __macro_local_6MemberfMu2_) -> Bool {
+                lhs != rhs
+            }
+        }
+        """#,
       macroSpecs: macros,
       failureHandler: expectNoMacroFailure
     )

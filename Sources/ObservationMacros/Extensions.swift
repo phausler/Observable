@@ -318,4 +318,23 @@ extension DeclGroupSyntax {
   var isNoncopyableStruct: Bool {
     isStruct && isNoncopyable
   }
+
+  // A type whose properties are observed by property index alone, in every
+  // build: no key path can name a property of a noncopyable struct, nor of an
+  // actor (or distributed actor), whose properties are isolated.
+  var observesByPropertyIndexOnly: Bool {
+    isNoncopyableStruct || isActor
+  }
+
+  // An actor that declares `SnapshotSource` (or `Observation.SnapshotSource`)
+  // in its inheritance clause, which `@Observable` then synthesizes the
+  // snapshot members of. Only what the syntax shows: a conformance declared
+  // in an extension isn't seen.
+  var isSnapshotSource: Bool {
+    guard isActor, let inherited = inheritanceClause?.inheritedTypes else { return false }
+    return inherited.contains { inherited in
+      let name = inherited.type.trimmedDescription
+      return name == "SnapshotSource" || name == "Observation.SnapshotSource"
+    }
+  }
 }

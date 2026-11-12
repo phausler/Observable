@@ -121,12 +121,12 @@ public struct ObservableMacro {
       """
   }
 
-  static func embeddedWithMutationPropertyIndexFunction(_ observableType: TokenSyntax, context: some MacroExpansionContext) -> DeclSyntax {
+  static func embeddedWithMutationPropertyIndexFunction(_ observableType: TokenSyntax, isolated: Bool = false, context: some MacroExpansionContext) -> DeclSyntax {
     let mutationGeneric = context.makeUniqueName("MutationResult")
     let failureGeneric = context.makeUniqueName("Failure")
     return
       """
-      internal nonisolated func withMutation<\(mutationGeneric), \(failureGeneric): Error>(
+      internal \(raw: isolated ? "" : "nonisolated ")func withMutation<\(mutationGeneric), \(failureGeneric): Error>(
         propertyIndex: Int,
         _ mutation: () throws(\(failureGeneric)) -> \(mutationGeneric)
       ) throws(\(failureGeneric)) -> \(mutationGeneric) {
@@ -150,10 +150,10 @@ public struct ObservableMacro {
   // Embedded as not. `withMutation(propertyIndex:_:)` is mutating and passes the
   // struct to `mutation` inout: a setter's closure could not otherwise
   // mutate the struct while a method borrows it.
-  static func noncopyableAccessPropertyIndexFunction(_ observableType: TokenSyntax, context: some MacroExpansionContext) -> DeclSyntax {
+  static func noncopyableAccessPropertyIndexFunction(_ observableType: TokenSyntax, isolated: Bool = false, context: some MacroExpansionContext) -> DeclSyntax {
     return
       """
-      internal nonisolated func access(propertyIndex: Int) {
+      internal \(raw: isolated ? "" : "nonisolated ")func access(propertyIndex: Int) {
         \(raw: registrarVariableName).access(propertyIndex: propertyIndex)
       }
       """
@@ -777,10 +777,6 @@ extension ObservableMacro: MemberMacro {
       // no copies.
       throw DiagnosticsError(syntax: node, message: "'@Observable' cannot be applied to struct type '\(observableType.text)'", id: .invalidApplication)
     }
-    if declaration.isActor {
-      // actors cannot yet be supported for their isolation
-      throw DiagnosticsError(syntax: node, message: "'@Observable' cannot be applied to actor type '\(observableType.text)'", id: .invalidApplication)
-    }
 
     // Validated here, once per type, rather than in the member attribute
     // expansion, which runs once per member and would repeat the diagnostic.
@@ -796,6 +792,50 @@ extension ObservableMacro: MemberMacro {
       declaration.addIfNeeded(ObservableMacro.shouldNotifyObserversEquatableFunction(observableType, final: false, context: context), to: &declarations)
       declaration.addIfNeeded(ObservableMacro.shouldNotifyObserversNonEquatableObjectFunction(observableType, final: false, context: context), to: &declarations)
       declaration.addIfNeeded(ObservableMacro.shouldNotifyObserversEquatableObjectFunction(observableType, final: false, context: context), to: &declarations)
+      return declarations
+    }
+    if declaration.isActor {
+      // An actor's properties are isolated, so no key path can name them
+      // either. Its members are isolated too, since a distributed actor
+      // cannot have a `nonisolated` registrar, and its `withMutation` is not
+      // mutating: the closure runs on the actor, in the setter's own
+      // isolation, and mutates it directly.
+      // An actor that conforms to `SnapshotSource` also gets its snapshot, and
+      // a registrar that is the snapshot's as well as its own, in place of the
+      // plain one.
+      var snapshotMembers: [DeclSyntax]?
+      if declaration.isSnapshotSource {
+        if declaration.modifiers.contains(where: { $0.name.tokenKind == .keyword(.distributed) }) {
+          // `latestSnapshot` is `nonisolated`, and a distributed actor
+          // can't have nonisolated stored state for it to read.
+          context.diagnose(Diagnostic(node: node, message: ObservationDiagnostic(
+            message: "'@Observable' cannot synthesize 'SnapshotSource' for distributed actor type '\(observableType.text)'",
+            domain: "Observation", id: .invalidApplication)))
+        } else {
+          snapshotMembers = ObservableMacro.snapshotMembers(of: declaration, node: node, in: context)
+        }
+      }
+      if snapshotMembers == nil {
+        declaration.addIfNeeded(ObservableMacro.registrarVariable(observableType, context: context), to: &declarations)
+      }
+      declaration.addIfNeeded(ObservableMacro.noncopyableAccessPropertyIndexFunction(observableType, isolated: true, context: context), to: &declarations)
+      declaration.addIfNeeded(ObservableMacro.embeddedWithMutationPropertyIndexFunction(observableType, isolated: true, context: context), to: &declarations)
+      declaration.addIfNeeded(ObservableMacro.shouldNotifyObserversNonEquatableFunction(observableType, final: false, context: context), to: &declarations)
+      declaration.addIfNeeded(ObservableMacro.shouldNotifyObserversEquatableFunction(observableType, final: false, context: context), to: &declarations)
+      declaration.addIfNeeded(ObservableMacro.shouldNotifyObserversNonEquatableObjectFunction(observableType, final: false, context: context), to: &declarations)
+      declaration.addIfNeeded(ObservableMacro.shouldNotifyObserversEquatableObjectFunction(observableType, final: false, context: context), to: &declarations)
+      for member in snapshotMembers ?? [] {
+        // `addIfNeeded` only knows functions and properties; the `Snapshot`
+        // structure is added unless the actor declares its own.
+        if let snapshot = member.as(StructDeclSyntax.self) {
+          let declared = declaration.memberBlock.members.contains {
+            $0.decl.as(StructDeclSyntax.self)?.name.text == snapshot.name.text
+          }
+          if !declared { declarations.append(member) }
+        } else {
+          declaration.addIfNeeded(member, to: &declarations)
+        }
+      }
       return declarations
     }
     // Each member that takes a key path is left out under Embedded, where
@@ -946,6 +986,11 @@ public struct ObservationTrackedMacro: AccessorMacro {
       return []
     }
 
+    // A property of a `SnapshotSource`'s `Snapshot` (see `SnapshotSynthesis.swift`).
+    if ObservationTrackedMacro.isSnapshotProperty(in: context) {
+      return snapshotAccessors(identifier: identifier, propertyIndex: try node.validatedObservationPropertyIndex())
+    }
+
     guard let typeDecl = ObservationTrackedMacro.observableTypeDecl(in: context) else {
       return []
     }
@@ -963,8 +1008,10 @@ public struct ObservationTrackedMacro: AccessorMacro {
     let propertyIndex = try node.validatedObservationPropertyIndex()
     _ = try node.validatedObservationGroup()
 
-    if typeDecl.isNoncopyableStruct {
-      return noncopyableAccessors(identifier: identifier, propertyIndex: propertyIndex)
+    if typeDecl.observesByPropertyIndexOnly {
+      // A `SnapshotSource`'s writes also invalidate its snapshot. A property
+      // `@ObservationIgnored` has returned above, so it is not one.
+      return noncopyableAccessors(identifier: identifier, propertyIndex: propertyIndex, isActor: typeDecl.isActor, invalidatesSnapshot: typeDecl.isSnapshotSource)
     }
 
     let propertyIndexArgument = propertyIndex.map { ", propertyIndex: \($0)" } ?? ""
@@ -1051,11 +1098,14 @@ public struct ObservationTrackedMacro: AccessorMacro {
   }
 
   // The type a tracked property is a member of, when it is one `@Observable`
-  // applies to: a class, or a noncopyable struct.
+  // applies to: a class, an actor (distributed or not), or a noncopyable struct.
   static func observableTypeDecl(in context: some MacroExpansionContext) -> (any DeclGroupSyntax)? {
     guard let lexical = context.lexicalContext.first else { return nil }
     if let classDecl = lexical.as(ClassDeclSyntax.self) {
       return classDecl
+    }
+    if let actorDecl = lexical.as(ActorDeclSyntax.self) {
+      return actorDecl
     }
     if let structDecl = lexical.as(StructDeclSyntax.self), structDecl.isNoncopyable {
       return structDecl
@@ -1065,8 +1115,9 @@ public struct ObservationTrackedMacro: AccessorMacro {
 
   // The accessors of a property of a noncopyable struct: property index-only calls in
   // every build, since no key path can name the property. The setter
-  // mutates through `withMutation(propertyIndex:_:)`, which passes the struct inout.
-  static func noncopyableAccessors(identifier: TokenSyntax, propertyIndex: Int?) -> [AccessorDeclSyntax] {
+  // mutates through `withMutation(propertyIndex:_:)`, which passes the struct inout;
+  // an actor's takes no argument, and its closure mutates the actor directly.
+  static func noncopyableAccessors(identifier: TokenSyntax, propertyIndex: Int?, isActor: Bool = false, invalidatesSnapshot: Bool = false) -> [AccessorDeclSyntax] {
     let initAccessor: AccessorDeclSyntax =
       """
       @storageRestrictions(initializes: _\(identifier))
@@ -1093,6 +1144,12 @@ public struct ObservationTrackedMacro: AccessorMacro {
         return _\(identifier)
       }
       """
+    let mutated = isActor ? "_\(identifier.text)" : "$0._\(identifier.text)"
+    // Only schedules the snapshot's refresh, which can't run until this job
+    // suspends, so where in the accessor it is called doesn't matter. In
+    // `set` it follows the equality guard: a write that observers aren't
+    // notified of doesn't change the snapshot either.
+    let invalidate = invalidatesSnapshot ? "\(ObservableMacro.snapshotInvalidateFunctionName)(propertyIndex: \(propertyIndex))\n" : ""
     let setAccessor: AccessorDeclSyntax =
       """
       set {
@@ -1100,8 +1157,8 @@ public struct ObservationTrackedMacro: AccessorMacro {
           _\(identifier) = newValue
           return
         }
-        withMutation(propertyIndex: \(raw: propertyIndex)) {
-          $0._\(identifier) = newValue
+        \(raw: invalidate)withMutation(propertyIndex: \(raw: propertyIndex)) {
+          \(raw: mutated) = newValue
         }
       }
       """
@@ -1109,7 +1166,7 @@ public struct ObservationTrackedMacro: AccessorMacro {
     let modifyAccessor: AccessorDeclSyntax =
       """
       _modify {
-        access(propertyIndex: \(raw: propertyIndex))
+        \(raw: invalidate)access(propertyIndex: \(raw: propertyIndex))
         \(raw: ObservableMacro.registrarVariableName).willSet(propertyIndex: \(raw: propertyIndex))
         defer {
           \(raw: ObservableMacro.registrarVariableName).didSet(propertyIndex: \(raw: propertyIndex))
@@ -1135,7 +1192,11 @@ extension ObservationTrackedMacro: PeerMacro {
           property.identifier?.trimmed != nil else {
       return []
     }
-    
+
+    if ObservationTrackedMacro.isSnapshotProperty(in: context) {
+      return snapshotPeers(of: property)
+    }
+
     guard let typeDecl = ObservationTrackedMacro.observableTypeDecl(in: context) else {
       return []
     }
